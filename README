@@ -1,7 +1,9 @@
-Public version of the explicit duration infinite hidden Markov model (ED-iHMM), a nonparametric Bayesian version of the EDHMM. 
+ED-iHMM -- Java implementation of the explicit duration infinite hidden Markov model
+====================================================================================
+Jonathan Huggins <jhh2143@columbia.ed>
 
-VERSION
--------
+This is the public version of the explicit duration infinite hidden Markov model 
+(ED-iHMM), a nonparametric Bayesian version of the EDHMM. 
 
+See edu.columbia.stat.wood.edihmm.main.* for example usages. 
 
-0.1 Initial beta release. Codebase still under heavy development
