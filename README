@@ -1,0 +1,7 @@
+Public version of the explicit duration infinite hidden Markov model (ED-iHMM), a nonparametric Bayesian version of the EDHMM. 
+
+VERSION
+-------
+
+
+0.1 Initial beta release. Codebase still under heavy development
