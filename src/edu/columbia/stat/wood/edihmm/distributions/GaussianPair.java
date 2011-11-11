@@ -3,6 +3,8 @@
  */
 package edu.columbia.stat.wood.edihmm.distributions;
 
+import java.util.Collection;
+
 /**
  * @author Jonathan Huggins
  *
@@ -36,7 +38,7 @@ public class GaussianPair extends PriorDataDistributionPair<Double, Double> {
 	}
 
 	@Override
-	public double observationLogLikelihood(Iterable<Double> observations, Double param) {
+	public double observationLogLikelihood(Collection<Double> observations, Double param) {
 		double sum = 0;
 		double sumSq = 0;
 		int n = 0;
@@ -57,7 +59,7 @@ public class GaussianPair extends PriorDataDistributionPair<Double, Double> {
 	}
 
 	@Override
-	public Double samplePosterior(Iterable<Double> observations) {
+	public Double samplePosterior(Collection<Double> observations) {
 		double sum = 0;
 		double sumSq = 0;
 		int n = 0;

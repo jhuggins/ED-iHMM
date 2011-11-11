@@ -27,7 +27,7 @@ public class EmissionDistribution<P, D> {
 	 * Auxiliary ArrayList used during updating; not
 	 * re-instantiated each update for efficiency
 	 */
-	private ArrayList<D> emissions; 
+	private ArrayList<ArrayList<D>> emissions; 
 	/**
 	 * One set of parameters for each state
 	 */
@@ -67,33 +67,40 @@ public class EmissionDistribution<P, D> {
 		emissions = null;
 	}
 	
-	public double probability(int state, D data) {
-		return Math.exp(pddp.dataLogLikelihood(emitParams.get(state), data));
+	public double logLikelihood(int state, D data) {
+		return pddp.dataLogLikelihood(emitParams.get(state), data);
 	}
 	
 	/**
 	 * 
 	 */
-	public void update(int states, State[] ss, D[] data) {
+	public void update(int states, ArrayList<State[]> ss, ArrayList<D[]> data) {
 		if (emissions == null) {
-			emissions = new ArrayList<D>(data.length);
+			emissions = new ArrayList<ArrayList<D>>(data.size()*2);
 		}
 		if (emitParams == null) {
 			emitParams = new ArrayList<P>((int)(states*1.5));
 		}
 		// update parameters for each state
+		int length = ss.size() > 0 ? ss.size() * ss.get(0).length : 10;
 		for (int k = 0; k < states; k++) {
-			emissions.clear();
-			int i = 0;
-			int count = 0;
-			for (State s : ss) {
-				if (s.getState() == k) {
-					emissions.add(data[i]);
-					count++;
-				}
-				i++;
+			if (emissions.size() == k) {
+				emissions.add(new ArrayList<D>(length));
+			} else {
+				emissions.get(k).clear();
 			}
-			P samp = pddp.samplePosterior(emissions);
+		}
+
+		int i = 0;
+		for (State[] seq : ss) {
+			D[] dat = data.get(i++);
+			int j = 0;
+			for (State s : seq) {
+				emissions.get(s.getState()).add(dat[j++]);
+			}
+		}
+		for (int k = 0; k < states; k++) {
+			P samp = pddp.samplePosterior(emissions.get(k));
 			if (emitParams.size() == k) {
 				emitParams.add(samp);
 			} else {
@@ -101,7 +108,7 @@ public class EmissionDistribution<P, D> {
 			}
 		}
 	}
-	
+
 	/**
 	 * 
 	 * @param state
@@ -130,15 +137,19 @@ public class EmissionDistribution<P, D> {
 		emitParams.add(pddp.samplePrior());
 	}
 	
-	public double logLikelihood(State[] ss, D[] data) {
+	public double logLikelihood(ArrayList<State[]> ss, ArrayList<D[]> data) {
 		ArrayList<LinkedList<D>> obs = new ArrayList<LinkedList<D>>(emitParams.size());
 		for (int i = 0; i < emitParams.size(); i++) {
 			obs.add(new LinkedList<D>());
 		}
-		for (int i = 0; i < ss.length; i++) {
-			obs.get(ss[i].getState()).add(data[i]);
+		for (int i = 0; i < ss.size(); i++) {
+			State[] seq = ss.get(i);
+			D[] dat = data.get(i);
+			for (int j = 0; j < seq.length; j++) {
+				obs.get(seq[j].getState()).add(dat[j]);
+			}
 		}
-		
+
 		double ll = 0;
 		for (int i = 0; i < emitParams.size(); i++) {
 			ll += pddp.observationLogLikelihood(obs.get(i), emitParams.get(i));

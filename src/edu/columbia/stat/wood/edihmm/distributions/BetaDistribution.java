@@ -53,11 +53,17 @@ public class BetaDistribution implements Distribution<Double> {
 	public Double sample() {
 		return betaDistr.nextDouble();
 	}
+	
+	public void setParameters(double a, double b) {
+		betaDistr.setState(a, b);
+		alpha = a;
+		beta = b;
+	}
 
 
 	public double logPartition()  {
 		throw new RuntimeException("Method Not Implemented");
-		//return Gamma.logBeta(alpha, beta);
+		//return Gamma.logBeta(alpha, scale);
 	}
 
 }

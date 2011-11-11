@@ -4,6 +4,7 @@
 package edu.columbia.stat.wood.edihmm.distributions;
 
 import java.io.Serializable;
+import java.util.Collection;
 
 
 
@@ -50,7 +51,7 @@ public abstract class PriorDataDistributionPair<P,D> implements Serializable {
 	 * @param count number of observations to use
 	 * @return posterior parameters for the data distribution 
 	 */
-	public abstract P samplePosterior(Iterable<D> observations);
+	public abstract P samplePosterior(Collection<D> observations);
 	
 	/**
 	 * Sample from the prior distribution p(param)
@@ -77,6 +78,14 @@ public abstract class PriorDataDistributionPair<P,D> implements Serializable {
 	 * @param count
 	 * @return
 	 */
-	public abstract double observationLogLikelihood(Iterable<D> observations, P param);
+	public abstract double observationLogLikelihood(Collection<D> observations, P param);
+	
+	public boolean sampleMH() {
+		return false;
+	}
+	
+	public ParamTransitionProbs<P> updateMH(P param, Collection<D> observations) {
+		throw new RuntimeException("Not Implemented");
+	}
 	
 }

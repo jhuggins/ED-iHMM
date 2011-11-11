@@ -3,6 +3,8 @@
  */
 package edu.columbia.stat.wood.edihmm.distributions;
 
+import java.util.Collection;
+
 import edu.columbia.stat.wood.edihmm.util.Util;
 import gov.sandia.cognition.math.matrix.*;
 import gov.sandia.cognition.math.matrix.mtj.DenseMatrixFactoryMTJ;
@@ -41,7 +43,7 @@ public class NormalInverseWishartMultivariateGaussianPair extends
 	}
 
 	@Override
-	public double observationLogLikelihood(Iterable<Vector> observations, MultivariateGaussianParams params) {
+	public double observationLogLikelihood(Collection<Vector> observations, MultivariateGaussianParams params) {
 		double ll = iwd.getProbabilityFunction().logEvaluate(params.covariance);
 		ll += MultivariateGaussian.logLikelihood(priorMean, params.covariance.scale(1/priorMeasurements), params.mean);
 		
@@ -59,7 +61,7 @@ public class NormalInverseWishartMultivariateGaussianPair extends
 	}
 
 	@Override
-	public MultivariateGaussianParams samplePosterior(Iterable<Vector> observations) {
+	public MultivariateGaussianParams samplePosterior(Collection<Vector> observations) {
 		Vector sum = DenseVectorFactoryMTJ.INSTANCE.createVector(priorMean.getDimensionality());
 		int n = 0;
 		for (Vector obs : observations) {
@@ -69,7 +71,7 @@ public class NormalInverseWishartMultivariateGaussianPair extends
 		double postMeasurements = n + priorMeasurements;
 		int postDf = n + df;
 		
-		Vector obsMean = n > 0 ? sum.scale(1.0/n) : DenseVectorFactoryMTJ.INSTANCE.createVector2D();
+		Vector obsMean = n > 0 ? sum.scale(1.0/n) : DenseVectorFactoryMTJ.INSTANCE.createVector(priorMean.getDimensionality());
 		Vector postMean = priorMean.scale(priorMeasurements/postMeasurements).plus(obsMean.scale(n/postMeasurements));
 		
 		Vector meanMinusPriorMean = obsMean.minus(priorMean);

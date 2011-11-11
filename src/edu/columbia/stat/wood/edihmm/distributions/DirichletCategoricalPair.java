@@ -4,6 +4,7 @@
 package edu.columbia.stat.wood.edihmm.distributions;
 
 import java.util.Arrays;
+import java.util.Collection;
 
 import edu.columbia.stat.wood.edihmm.util.Util;
 
@@ -35,7 +36,7 @@ public class DirichletCategoricalPair extends PriorDataDistributionPair<Double[]
 	}
 
 	@Override
-	public Double[] samplePosterior(Iterable<Integer> observations) {
+	public Double[] samplePosterior(Collection<Integer> observations) {
 		double[] postParams = Arrays.copyOf(priorParams, priorParams.length);
 		for (Integer obs : observations) {
 			postParams[obs] += 1;
@@ -44,7 +45,7 @@ public class DirichletCategoricalPair extends PriorDataDistributionPair<Double[]
 	}
 
 	@Override
-	public double observationLogLikelihood(Iterable<Integer> observations, Double[] params) {
+	public double observationLogLikelihood(Collection<Integer> observations, Double[] params) {
 		double[] counts = Arrays.copyOf(priorParams, priorParams.length);
 		for (Integer obs : observations) {
 			counts[obs]++;

@@ -16,6 +16,8 @@ public class MultivariateGaussianParams implements Serializable {
 
 	private static final long serialVersionUID = -8299873574416789930L;
 	
+	public static boolean SHOW_COV = true;
+	
 	public Vector mean;
 	public Matrix covariance;
 	
@@ -31,7 +33,7 @@ public class MultivariateGaussianParams implements Serializable {
 	}
 	
 	public String toString() {
-		return "(mean = " + mean + ", covariance = " + covariance + ")"; 
+		return "(mean = " + mean + (SHOW_COV ? ", covariance = " + covariance : "") + ")";  
 	}
 	
 }

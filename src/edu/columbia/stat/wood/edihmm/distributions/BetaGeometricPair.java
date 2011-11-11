@@ -3,6 +3,8 @@
  */
 package edu.columbia.stat.wood.edihmm.distributions;
 
+import java.util.Collection;
+
 import cern.jet.stat.Gamma;
 import edu.columbia.stat.wood.edihmm.util.Util;
 import gov.sandia.cognition.statistics.distribution.GeometricDistribution;
@@ -33,18 +35,19 @@ public class BetaGeometricPair extends IntegerPriorDataDistributionPair<Double> 
 
 	@Override
 	public double dataLogLikelihood(Double param, Integer value) {
-		return (value-1)*Math.log(param) + Math.log(1- param);
+		return (value-1)*Math.log(param) + Math.log(1 - param);
 	}
 
 	@Override
-	public double observationLogLikelihood(Iterable<Integer> observations, Double param) {
+	public double observationLogLikelihood(Collection<Integer> observations, Double param) {
 		int sum = 0;
 		int n = 0;
 		for (Integer obs : observations) {
 			sum += obs;
 			n++;
 		}
-		return Math.log(Gamma.beta(a + n, b + sum) / Gamma.beta(a, b));
+		return   Gamma.logGamma(a+n) + Gamma.logGamma(b + sum) - Gamma.logGamma(a + b + n + sum)
+		       - Gamma.logGamma(a)   - Gamma.logGamma(b)       + Gamma.logGamma(a + b); 
 	}
 
 	@Override
@@ -53,14 +56,14 @@ public class BetaGeometricPair extends IntegerPriorDataDistributionPair<Double> 
 	}
 
 	@Override
-	public Double samplePosterior(Iterable<Integer> observations) {
+	public Double samplePosterior(Collection<Integer> observations) {
 		int sum = 0;
 		int n = 0;
 		for (Integer obs : observations) {
 			sum += obs;
 			n++;
 		}
-		return BetaDistribution.sample(a + n, b + sum);
+		return 1 - BetaDistribution.sample(a + n, b + sum);
 	}
 
 }

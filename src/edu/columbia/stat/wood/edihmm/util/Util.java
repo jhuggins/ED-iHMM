@@ -3,11 +3,29 @@
  */
 package edu.columbia.stat.wood.edihmm.util;
 
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Random;
 
 import cern.jet.random.engine.MersenneTwister;
 import cern.jet.random.engine.RandomEngine;
+import edu.columbia.stat.wood.edihmm.DurationDistribution;
+import edu.columbia.stat.wood.edihmm.EDiHMM;
+import edu.columbia.stat.wood.edihmm.EmissionDistribution;
+import edu.columbia.stat.wood.edihmm.Sample;
+import edu.columbia.stat.wood.edihmm.State;
+import edu.columbia.stat.wood.edihmm.distributions.GaussianParams;
+import edu.columbia.stat.wood.edihmm.distributions.MultivariateGaussianParams;
+import gov.sandia.cognition.math.matrix.Matrix;
+import gov.sandia.cognition.math.matrix.MatrixFactory;
+import gov.sandia.cognition.math.matrix.Vector;
+import gov.sandia.cognition.math.matrix.VectorFactory;
+import gov.sandia.cognition.math.matrix.mtj.DenseMatrixFactoryMTJ;
+import gov.sandia.cognition.math.matrix.mtj.DenseVectorFactoryMTJ;
 
 /**
  * @author Jonathan Huggins
@@ -17,9 +35,12 @@ public class Util {
 
 	public static final Random RAND = new Random(10);
 	//public static final RandomEngine RNG = new MersenneTwister(new Date());
-	public static final RandomEngine RNG = new MersenneTwister(11);
+	public static RandomEngine RNG = new MersenneTwister(11);
 	//public static final double LN_2 = Math.log(2);
 	public static final double EPS = 1e-100;
+	
+	public static final VectorFactory<? extends Vector> VF = DenseVectorFactoryMTJ.getDenseDefault();
+	public static final MatrixFactory<? extends Matrix> MF = DenseMatrixFactoryMTJ.getDenseDefault();
 	
 	public static double[] addArrays(double[] da, int[] ia) {
 		assert da.length == ia.length;
@@ -82,6 +103,16 @@ public class Util {
     	return min;
     }
     
+    public static int min(int... nums) {
+    	int min = Integer.MAX_VALUE;
+    	for (int n : nums) {
+    		if (n < min)
+    			min = n;
+    	}
+    	return min;
+    	
+    }
+    
     public static int max(int... nums) {
     	int max = Integer.MIN_VALUE;
     	for (int n : nums) {
@@ -91,6 +122,28 @@ public class Util {
     	return max;
     	
     }
+    
+    public static double min(Double... nums) {
+    	Double min = Double.POSITIVE_INFINITY;
+    	for (Double d : nums) {
+    		if (d < min)
+    			min = d;
+    	}
+    	return min;
+    	
+    }
+    
+    public static double max(Double... nums) {
+    	Double max = Double.NEGATIVE_INFINITY;
+    	for (Double d : nums) {
+    		if (d > max)
+    			max = d;
+    	}
+    	return max;
+    	
+    }
+    
+
     
 	public static double columnMax(double[][] arr, int col) {
 	  	double max = Double.NEGATIVE_INFINITY;
@@ -129,6 +182,8 @@ public class Util {
     }
     
     public static String toString(double[][] mat) {
+    	if (mat == null)
+    		return "null";
     	String str = "[";
     	int i = 0;
 		for (double[] row : mat) {
@@ -188,6 +243,26 @@ public class Util {
 		}
 		return false;
 	}
+	
+
+	
+	/**
+	 * 
+	 * @param ss
+	 * @return
+	 */
+	public static int[] states(State[] ss) {
+		if (ss == null) {
+			return null;
+		}
+		int[] states = new int[ss.length];
+		int j = 0;
+		for (State st : ss) {
+			states[j++] = st.getState(); 
+		}
+		return states;
+	}
+
     
   
 }

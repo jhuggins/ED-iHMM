@@ -9,11 +9,17 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.ListIterator;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
-import cern.colt.Timer;
 import cern.jet.random.Normal;
-
 import edu.columbia.stat.wood.edihmm.MixingProportions.Mode;
 import edu.columbia.stat.wood.edihmm.distributions.BetaDistribution;
 import edu.columbia.stat.wood.edihmm.distributions.CategoricalDistribution;
@@ -34,15 +40,20 @@ import edu.columbia.stat.wood.edihmm.util.Util;
  * @param E emission distribution type
  * @param D duration distribution parameter type
  */
-public class EDiHMM<P,E,D> {
+public class EDiHMM<P,E,D> implements JLL {
 
-	private static final double AUX_MAX_START = 1e-4;
-//	private static final int SPLIT_MERGE_INTERVAL = 5;
+	private static double EPS = 1e-100;
+	private static double AUX_MIN_START = 1e-8;
+	//	private static final int SPLIT_MERGE_INTERVAL = 5;
 	private static final int MAX_BREAKS = 20;
 	private static final int MH_HYPER_ITERS = 10;
 	public static final State START_STATE = new State(0,-1);
+	public static final double TEMP_INCR_FACTOR = 2.0; 
+	public static final double TEMP_DECR_FACTOR = .95; 
 
 	private Hyperparameters hypers;
+	private boolean anneal = false;
+	private double baseTemp;
 	private BetaDistribution auxDistr;
 	private int numStates;
 	private EmissionDistribution<P,E> ed;
@@ -59,15 +70,19 @@ public class EDiHMM<P,E,D> {
 	/**
 	 * Auxiliary r.v.'s
 	 */
-	private double[] auxArray;
+	private ArrayList<double[]> aux;
+	/**
+	 * Minimum auxiliary values
+	 */
+	private ArrayList<Double> minAux;
 	/**
 	 * The state sequence
 	 */
-	private State[] ss;
+	private ArrayList<State[]> ss;
 	/**
 	 * The data
 	 */
-	private E[] data;
+	private ArrayList<E[]> data;
 	/**
 	 * joint loglikelihood for each iteration
 	 */
@@ -76,7 +91,8 @@ public class EDiHMM<P,E,D> {
 	/**
 	 * Listeners
 	 */
-	private LinkedList<IterationListener> iterListeners;
+	private LinkedList<IterationListener<P,E,D>> iterListeners;
+	private ExecutorService threadPool;
 
 
 	/**
@@ -87,12 +103,11 @@ public class EDiHMM<P,E,D> {
 	public EDiHMM(Sample<P,E,D> sample) {
 		this(new EmissionDistribution<P,E>(sample.emitDistribution, sample.emitParams), 
 				new DurationDistribution<D>(sample.durationDistribution, sample.durationParams),
-				sample.pi, sample.pi0);
+				sample.hypers, sample.pi, sample.pi0);
 		mp = sample.mp;
 		ss = sample.stateSequence;
-		hypers = sample.hypers;
-		
-		iterListeners = new LinkedList<IterationListener>();
+
+		iterListeners = new LinkedList<IterationListener<P,E,D>>();
 	}
 
 	/**
@@ -104,19 +119,23 @@ public class EDiHMM<P,E,D> {
 	 * @param pi
 	 * @param pi0
 	 */
-	public EDiHMM(EmissionDistribution<P,E> ed, DurationDistribution<D> dd, double[][] pi, double[] pi0) {
+	public EDiHMM(EmissionDistribution<P,E> ed, DurationDistribution<D> dd, Hyperparameters hypers, double[][] pi, double[] pi0) {
 		this.ed = ed;
 		this.dd = dd;
 		mp = null;
 		this.pi = pi;
 		this.pi0 = pi0;
-		auxArray = null;
-		data = null;
-		ss = null;
-		hypers = null;
+		data = new ArrayList<E[]>();
+		ss = new ArrayList<State[]>();
+		aux = new ArrayList<double[]>();
+		minAux = new ArrayList<Double>();
+		this.hypers = hypers;
+		baseTemp = hypers.temperature;
+		this.auxDistr = new BetaDistribution(1,1);
+		updateAuxDistr();
 		numStates = pi == null ? 0 : pi.length;
 
-		iterListeners = new LinkedList<IterationListener>();
+		iterListeners = new LinkedList<IterationListener<P,E,D>>();
 	}
 
 	/**
@@ -126,32 +145,43 @@ public class EDiHMM<P,E,D> {
 	 * @param ed
 	 * @param dd
 	 */
-	public EDiHMM(EmissionDistribution<P,E> ed, DurationDistribution<D> dd) {
-		this(ed, dd, null, null);
+	public EDiHMM(EmissionDistribution<P,E> ed, DurationDistribution<D> dd, Hyperparameters hypers) {
+		this(ed, dd, hypers, null, null);
 	}
 
 	/**
 	 * Fill the array with generated data and return the log-likelihood 
-	 * of the data. 
+	 * of the data if <code>replaceData == true</code>
 	 * 
 	 * @return 
 	 */
-	public double generateData(E[] genData, Hyperparameters hypers) {
-		this.hypers = hypers;
-		ss = sampleStateSequence(genData.length, numStates);
+	public double generateData(E[] genData, boolean replaceData) {
+		State[] ss = sampleStateSequence(genData.length, numStates);
 		for (int i = 0; i < genData.length; i++) {
 			genData[i] = ed.sample(ss[i].getState());
 		}
-		data = genData;
-		mp =  new MixingProportions(1, new int[numStates][numStates+1], hypers.q, MixingProportions.Mode.GEOM);
-		int[][] obsCounts = calculateTransitionCounts();
-		int[][] rCounts = sampleRCounts(obsCounts);
-		mp.sampleParameters(hypers.c0, rCounts);
-		sampleHyperparameters(obsCounts);
-		rCounts = sampleRCounts(obsCounts);
-		mp.sampleParameters(hypers.c0, rCounts);
-		
-		return jll(obsCounts);
+		if (replaceData) {
+			clearData();
+			data.add(genData);
+			this.ss.add(ss);
+			mp =  new MixingProportions(hypers.c0, new int[numStates][numStates+1], hypers.q, MixingProportions.Mode.GEOM);
+			int[][] obsCounts = calculateTransitionCounts();
+			int[][] rCounts = sampleRCounts(obsCounts);
+			mp.sampleParameters(hypers.c0, rCounts);
+			sampleHyperparameters(obsCounts);
+			rCounts = sampleRCounts(obsCounts);
+			mp.sampleParameters(hypers.c0, rCounts);
+
+			return jll(obsCounts);
+		} else {
+			return Double.NaN;
+		}
+	}
+
+	public void clearData() {
+		data.clear();
+		ss.clear();
+		aux.clear();
 	}
 
 	/**
@@ -159,19 +189,10 @@ public class EDiHMM<P,E,D> {
 	 * 
 	 * @return the ss
 	 */
-	public State[] getStateSequence() {
+	public ArrayList<State[]> getStateSequence() {
 		return ss;
 	}
 
-	/**
-	 * 
-	 * Set the state sequence.
-	 * 
-	 * @param ss the new state sequence
-	 */
-	public void setStateSequence(State[] ss) {
-		this.ss = ss;
-	}
 
 	public static <P,E,D> int[] calculateStateCountDistribution(List<Sample<P,E,D>> samples) {
 		int max = 0;
@@ -185,12 +206,16 @@ public class EDiHMM<P,E,D> {
 		return counts;
 	}
 
-	public static <P,E> double predictivePerplexity(double[] probabilities) {
+	public static <P,E> double predictivePerplexity(double[][] probabilities) {
 		double logsum = 0;
-		for (double p : probabilities) {
-			logsum += Math.log(p); 
+		int len = 0;
+		for (double[] ps : probabilities) {
+			len += ps.length;
+			for (double p : ps) {
+				logsum += Math.log(p); 
+			}
 		}
-		return Math.pow(2, -logsum/probabilities.length/Math.log(2));
+		return Math.pow(2, -logsum/len/Math.log(2));
 	}
 
 	public static <P,E,D> double predictivePerplexity(Sample<P,E,D> sample) {
@@ -204,45 +229,62 @@ public class EDiHMM<P,E,D> {
 		if (samples.isEmpty()) {
 			return 0;
 		}
-		double[] probSums = new double[samples.get(0).predictiveProbabilities.length];
+		double[][] probSums = new double[samples.get(0).predictiveProbabilities.length][];
 		for (Sample<P,E,D> s : samples) {
 			for (int i = 0; i < probSums.length; i++) {
-				probSums[i] += s.predictiveProbabilities[i];
+				if (probSums[i] == null) 
+					probSums[i] = new double[s.predictiveProbabilities[i].length];
+				for (int j = 0; j < probSums[i].length; j++) {
+					probSums[i][j] += s.predictiveProbabilities[i][j];
+				}
 			}
 		}
 		double logsum = 0;
-		for (int i = 0; i < probSums.length; i++) {
-			logsum += Math.log(probSums[i]/samples.size());
+		double len = 0;
+		for (double[] ps : probSums) {
+			len += ps.length;
+			for (double p : ps) { 
+				logsum += Math.log(p/samples.size());
+			}
 		}
-		
-		return Math.pow(2, -logsum/probSums.length/Math.log(2));
+
+		return Math.pow(2, -logsum/len/Math.log(2));
 	}
 
 	public double predictivePerplexity() {
 		return predictivePerplexity(predictiveProbabilities());
 	}
 
-	public double[] predictiveProbabilities() {
-		double[] probs = new double[data.length];
-		double prevJLL = 0;
-		for (int i = 0; i < probs.length; i++) {
-			E[] tempData = Arrays.copyOf(data, i+1);
-			State[] tempSS = Arrays.copyOf(ss, i+1);
-			int[][] obsCounts = calculateTransitionCounts(tempSS);
-			// emissions and duration LLs
-			double jll = ed.logLikelihood(tempSS, tempData);
-			jll += dd.logLikelihood(tempSS);
-			
-			// transition LL
-			for (int m = 0; m < obsCounts.length; m++) {
-				double[] c1b = mp.getBetas(m);
-				Util.multiply(hypers.c1, c1b);
-				jll += DirichletDistribution.logPartition(Util.addArrays(c1b, obsCounts[m])) - DirichletDistribution.logPartition(c1b);
+	public double[][] predictiveProbabilities() {
+		double[][] probs = new double[data.size()][];
+		ArrayList<State[]> tempSS = new ArrayList<State[]>(1); 
+		tempSS.add(null);
+		ArrayList<E[]> tempData = new ArrayList<E[]>(1); 
+		tempData.add(null);
+		int j = 0;
+		for (E[] dat : data) {
+			probs[j] = new double[dat.length];
+			double prevJLL = 0;
+			for (int i = 0; i < probs.length; i++) {
+				tempData.set(0, Arrays.copyOf(dat, i+1));
+				tempSS.set(0, Arrays.copyOf(ss.get(j), i+1));
+				int[][] obsCounts = calculateTransitionCounts(tempSS);
+				// emissions and duration LLs
+				double jll = ed.logLikelihood(tempSS, tempData);
+				jll += dd.logLikelihood(tempSS);
+
+				// transition LL
+				for (int m = 0; m < obsCounts.length; m++) {
+					double[] c1b = mp.getBetas(m);
+					Util.multiply(hypers.c1, c1b);
+					jll += DirichletDistribution.logPartition(Util.addArrays(c1b, obsCounts[m])) - DirichletDistribution.logPartition(c1b);
+				}
+				probs[j][i] = Math.exp(jll - prevJLL);
+				prevJLL = jll;
 			}
-			probs[i] = Math.exp(jll - prevJLL);
-			prevJLL = jll;
+			j++;
 		}
-		
+
 		return probs;
 	}
 
@@ -253,10 +295,25 @@ public class EDiHMM<P,E,D> {
 		return jll;
 	}
 
-	/**
+	public void addData(E[] dat) {
+		data.add(dat);
+		ss.add(new State[dat.length]);
+		aux.add(new double[dat.length]);
+		minAux.add(0.0);
+	}
+
+
+	public void setData(ArrayList<E[]> newData) {
+		clearData();
+		data.ensureCapacity(newData.size());
+		for (E[] dat : newData)
+			addData(dat);
+	}
+	
+	/** 
 	 * Sample from the ED-iHMM, with the initial parameters sampled from the prior. 
 	 * 
-	 *  @see edu.columbia.stat.wood.edihmm.EDiHMM#sample(E[], Hyperparameters, int, int, int, int, State[])
+	 * @see edu.columbia.stat.wood.edihmm.EDiHMM#sample(E[], Hyperparameters, int, int, int, int, State[])
 	 * @param data
 	 * @param hypers
 	 * @param burnin
@@ -265,8 +322,8 @@ public class EDiHMM<P,E,D> {
 	 * @param states
 	 * @return
 	 */
-	public List<Sample<P,E,D>> sample(E[] data, Hyperparameters hypers, int burnin, int interval, int samples, int states){
-		return sample(data, hypers, burnin, interval, samples, states, null);
+	public List<Sample<P,E,D>> sample(int burnin, int interval, int samples, int states, int threads) {
+		return sample(burnin, interval, samples, states, threads, null);
 	}
 
 	/**
@@ -282,20 +339,18 @@ public class EDiHMM<P,E,D> {
 	 * 
 	 * @return
 	 */
-	public List<Sample<P,E,D>> sample(E[] data, Hyperparameters hypers, int burnin, int interval, int samples, int states, State[] ss) {
-		if (ss != null && data.length != ss.length) {
+	public List<Sample<P,E,D>> sample(int burnin, int interval, int samples, int states, int threads, ArrayList<State[]> ss) {
+		if (ss != null && data.size() != ss.size()) {
 			throw new IllegalArgumentException("data and state sequence length are not equal");
 		} else if (burnin < 0 || interval < 1 || samples < 1 || states < 1) {
-			throw new IllegalArgumentException("invalid sampling parameter");
+			//throw new IllegalArgumentException("invalid sampling parameter");
 		}
-
-		this.hypers = hypers;
-		this.auxDistr = new BetaDistribution(1/hypers.temperature, hypers.temperature);
-		this.data = data;
+		
 		this.numStates = states;
-		this.ss = ss == null ? new State[data.length] : ss;
-
-		auxArray = new double[data.length];
+		if (ss != null) {
+			this.ss = ss;
+		}
+		threadPool = Executors.newFixedThreadPool(threads);
 
 		// initial mixing proportions and transition matrix
 		int[][] obsCounts = ss != null ? calculateTransitionCounts() : new int[states][states+1];
@@ -306,7 +361,7 @@ public class EDiHMM<P,E,D> {
 		}
 		TransitionProbabilities tp;
 		if (ss != null) {
-			tp = mp.sampleTransitionMatrix(hypers.c1, obsCounts, ss[0].getState());
+			tp = mp.sampleTransitionMatrix(hypers.c1, obsCounts, ss);
 		} else {
 			tp = mp.sampleTransitionMatrix(hypers.c1, obsCounts); 
 		}
@@ -315,44 +370,51 @@ public class EDiHMM<P,E,D> {
 
 		// sample duration and emission parameters from their priors if necessary
 		if (dd.states() != states) {
-			dd.update(states, new State[] {});
+			dd.update(states, new ArrayList<State[]>(), null);
+//			dd.update(states, ss);
 		}
 		if (ed.states() != states) {
-			ed.update(states, new State[] {}, (E[])new Object[] {}); 
+			ed.update(states, new ArrayList<State[]>(), new ArrayList<E[]>());
+//			ed.update(states, ss, data);
+		}
+		
+		if (ss == null) {
+			for (int i = 0; i < this.ss.size(); i++) {
+				this.ss.set(i, sampleStateSequence(data.get(i).length, states));
+			}
 		}
 
 		// generate a starting state sequence, if necessary
-//		if (ss == null) {
-//			this.ss = sampleStateSequence(data.length, states);
-//			tp = mp.sampleTransitionMatrix(hypers.c1, calculateTransitionCounts(), this.ss[0].getState());  
-//			pi = tp.pi;
-//			pi0 = tp.pi0;
-//		} else{
-//			this.ss = ss;
-//		}
+		//		if (ss == null) {
+		//			this.ss = sampleStateSequence(data.length, states);
+		//			tp = mp.sampleTransitionMatrix(hypers.c1, calculateTransitionCounts(), this.ss[0].getState());  
+		//			pi = tp.pi;
+		//			pi0 = tp.pi0;
+		//		} else{
+		//			this.ss = ss;
+		//		}
 
 		System.out.println(mp);
-
 		// sample
 		jll = new double[burnin + interval*(samples-1) + 1];
 		LinkedList<Sample<P,E,D>> sampList = new LinkedList<Sample<P,E,D>>();
 
 		Sample<P,E,D> sample;
 		for (int i = 0; i < burnin; i++) {
-			while ((sample = sample(i+1, false)) == null)
+			while ((sample = sample(i+1, threads, false)) == null)
 				continue;
 			passSampleToListeners(sample, false);
 		}
 		for (int i = 0; i <= interval*(samples-1); i++) {
 			boolean keep = i % interval == 0;
-			while ((sample = sample(i+burnin+1, keep)) == null)
+			while ((sample = sample(i+burnin+1, threads, keep)) == null)
 				continue;
 			passSampleToListeners(sample, keep);
 			if (keep) {
 				sampList.add(sample);
 			}
 		}
-//		System.out.println("split-merge accept proportion = " + ((double)accepts)/total);
+		//		System.out.println("split-merge accept proportion = " + ((double)accepts)/total);
 
 		return sampList;
 	}
@@ -364,58 +426,156 @@ public class EDiHMM<P,E,D> {
 	 * @param keep
 	 * @return the sample if sampling is successful and null otherwise
 	 */
-	private Sample<P,E,D> sample(int n, boolean keep) {
-		
-		double minAux = AUX_MAX_START;
+	private Sample<P,E,D> sample(int n, int threads, boolean keep) {
+		System.out.println("temperature = " + hypers.temperature);
+		double minMinAux = 1;
 		//		System.out.println("n = " + n);
 		if (n > 1) {
-			minAux = sampleAuxiliaryVars(); 
+			for (int i = 0; i < aux.size(); i++) {
+				minAux.set(i, sampleAuxiliaryVars(aux.get(i), ss.get(i)));
+				//minAux.set(i, sampleAuxiliaryVars(aux.get(i), ss.get(i))/Util.columnMax(pi, i));
+				minMinAux = Math.min(minMinAux, minAux.get(i));
+			}
 		} else {
-			Arrays.fill(auxArray, minAux);
-		}
-//		System.out.println("1");
-		extendStateSpace(minAux);
-//		System.out.println("2");
-		ArrayList<LinkedHashMap<State,ArrayList<State>>> reachableStates = reachableStates(minAux);
-//		System.out.println("3");
-		if (reachableStates == null) {
-			System.err.println("No path through state space. Resampling...");
-			sampleParameters(calculateTransitionCounts());
-			return null;
+			for (int i = 0; i < aux.size(); i++) {
+				Arrays.fill(aux.get(i), AUX_MIN_START);
+				minAux.set(i, AUX_MIN_START);
+			}
+			minMinAux = AUX_MIN_START;
 		}
 
-		ArrayList<HashMap<State, Double>> alphas = forwardPass(reachableStates); 
-		
-		if (alphas == null) {
-			System.err.println("No path through state space. Resampling...");
-			sampleParameters(calculateTransitionCounts());
-			return null;
+//		System.out.println("1");
+		extendStateSpace(minMinAux);
+
+		if (threads > 1) {
+			//threadPool = Executors.newFixedThreadPool(threads);
+			LinkedList<Future<Boolean>> results = new LinkedList<Future<Boolean>>();
+			// execute jobs
+			for (int i = 0; i < data.size(); i++) {
+				results.add(threadPool.submit(new ForwardBackward(i, minAux.get(i), aux.get(i), ss.get(i), data.get(i))));
+			}
+			
+			// wait for results
+			while(results.size() > 0) {
+				try {
+					threadPool.awaitTermination(1, TimeUnit.MILLISECONDS);
+				} catch (InterruptedException e) {
+					System.out.println("EDiHMM sample: igoring InterruptedException");
+					e.printStackTrace();
+				}
+				boolean cancel = false;
+				for (ListIterator<Future<Boolean>> iter = results.listIterator(); iter.hasNext(); ) {
+					Future<Boolean> f = iter.next();
+					if (f.isDone()) {
+						iter.remove();
+						try {
+							if (!f.get()) {
+								cancel = true;
+							}
+						} catch (InterruptedException e) {
+							cancel = true;
+						} catch (ExecutionException e) {
+							cancel = true;
+						} catch (CancellationException e) {
+							cancel = true;
+						}
+					} 
+				}
+				if (cancel) {
+					System.out.println("No path through state space. cancelling...");
+					threadPool.shutdownNow();
+					System.err.println("Validating termination...");
+					while(!threadPool.isTerminated()) {
+						try {
+							threadPool.awaitTermination(1, TimeUnit.MILLISECONDS);
+						} catch (InterruptedException e) {
+							System.out.println("EDiHMM sample: igoring InterruptedException");
+							e.printStackTrace();
+						}
+					}	
+					System.err.println("Terminated. Resampling...");
+					increaseTemp();
+					sampleParameters(calculateTransitionCounts());
+					System.err.println("Done resampling...");
+					return null;
+				}
+			}
+			
+		} else { // no threading
+			for (int i = 0; i < data.size(); i++) {
+				if (data.size() > 1) {
+					System.out.print(i + " ");
+				}
+				//System.out.print(data.get(i).length + " ");
+//				System.out.println("2");
+				ArrayList<LinkedHashMap<State,ArrayList<State>>> reachableStates = reachableStates(minAux.get(i), aux.get(i));
+				//ArrayList<LinkedHashMap<State,ArrayList<State>>> reachableStatesOld = reachableStatesOld(minAux.get(i), aux.get(i));
+//				System.out.println("3");
+				if (reachableStates  == null) {
+					System.out.println();
+					System.err.println("No path through state space (reachable). Resampling...");
+					increaseTemp();
+					sampleParameters(calculateTransitionCounts());
+					return null;
+				}
+
+				ArrayList<HashMap<State, Double>> logAlphas = forwardPass(reachableStates, data.get(i), aux.get(i)); 
+//				ArrayList<HashMap<State, Double>> alphas = forwardPassOld(reachableStates, data.get(i), aux.get(i));
+//				for (int j = 0; j < logAlphas.size(); j++) { 
+//					for(Map.Entry<State, Double> e : logAlphas.get(j).entrySet()) {
+//						double ll = Math.log(alphas.get(j).get(e.getKey()));
+//						System.out.printf("%s logalpha=%f log(alpha)=%f diff=%f\n", e.getKey(), e.getValue(), ll, e.getValue() - ll);
+//						if (e.getValue() - ll != 0) {
+//							continue;
+//						}
+//					}			
+//				}
+
+				if (logAlphas == null) {
+					System.out.println();
+					System.err.println("No path through state space (forward). Resampling...");
+					increaseTemp();
+					sampleParameters(calculateTransitionCounts());
+					return null;
+				}
+				//		System.out.println("4");
+				if (!backwardSample(logAlphas, ss.get(i), aux.get(i))) {
+					System.out.println();
+					System.err.println("No path through state space (backward). Resampling...");
+					increaseTemp();
+					sampleParameters(calculateTransitionCounts());
+					return null;
+				}
+
+			}
+			System.out.println();
 		}
-//		System.out.println("4");
-		backwardSample(alphas);
+		//System.out.println();
 //		System.out.println("5");
 		cleanupStateSpace();
-		
+
 //		System.out.println("6");
 		int[][] obsCounts = calculateTransitionCounts();
-		
+
 		sampleParameters(obsCounts);
 //		System.out.println("7");
-//		if (n > 29 && n % SPLIT_MERGE_INTERVAL == 0) {
-//			//splitMerge();
-//			restrictedForwardBackward();
-//			System.out.println("split-merge accept proportion = " + ((double)accepts)/total);
-//			obsCounts = calculateTransitionCounts();
-//		}
-//		System.out.println("8");
+		//		if (n > 29 && n % SPLIT_MERGE_INTERVAL == 0) {
+		//			//splitMerge();
+		//			restrictedForwardBackward();
+		//			System.out.println("split-merge accept proportion = " + ((double)accepts)/total);
+		//			obsCounts = calculateTransitionCounts();
+		//		}
+		//		System.out.println("8");
 		jll[n-1] = jll(obsCounts, false);
 //		System.out.println("9");
 		System.out.printf("%d jll=%.4f c0=%.4f c1=%.4f q=%.4f states=%d norm_gamma=%s\n", n, jll[n-1], hypers.c0, hypers.c1, mp.q, numStates, Arrays.toString(mp.getNormalizedGammas()));
 		ed.printParams();
 		dd.printParams();
 		System.out.println(mp);
+		
+		decreaseTemp();
 
-		return new Sample<P,E,D>(pi0, pi, mp, ss, jll[n-1], hypers, dd.getPddp(), dd.getParameters(), ed.getPddp(), ed.getParameters(), keep ? predictiveProbabilities() : null) ;
+		return new Sample<P,E,D>(pi0, pi, mp, ss, jll[n-1], hypers, dd.getPddp(), dd.getParameters(), ed.getPddp(), ed.getParameters(), null) ; // keep ? predictiveProbabilities() : null
 	}
 
 	private void extendStateSpace(double minAux) {
@@ -444,23 +604,29 @@ public class EDiHMM<P,E,D> {
 		numStates -= removedStates.size();
 	}
 
+	private int mapSize = 10;
+	private float loadFactor = 0.75f;
 	/**
 	 * 
 	 * 
 	 * @param minAux
 	 * @return
 	 */
-	private ArrayList<LinkedHashMap<State,ArrayList<State>>> reachableStates(double minAux) {
+	private ArrayList<LinkedHashMap<State,ArrayList<State>>> reachableStates(double minAux, double[] auxArr) {
+
 		Range[] ranges = dd.durationRanges(minAux);
-		ArrayList<LinkedHashMap<State,ArrayList<State>>> reachable = new ArrayList<LinkedHashMap<State,ArrayList<State>>>(auxArray.length);
+		ArrayList<LinkedHashMap<State,ArrayList<State>>> reachable = new ArrayList<LinkedHashMap<State,ArrayList<State>>>(auxArr.length);
 
 		LinkedHashMap<State,ArrayList<State>> prevStates = new LinkedHashMap<State,ArrayList<State>>();
 		prevStates.put(START_STATE, null);
 
-		for(int t = 0; t < auxArray.length; t++) {
-			double aux = auxArray[t];
-			LinkedHashMap<State,ArrayList<State>> currStates = new LinkedHashMap<State,ArrayList<State>>();
-			for (State prevState : prevStates.keySet()){
+		for(int t = 0; t < auxArr.length; t++) {
+			if (Thread.interrupted()) {
+				return null;
+			}
+			double aux = auxArr[t];
+			LinkedHashMap<State,ArrayList<State>> currStates = new LinkedHashMap<State,ArrayList<State>>((int) (mapSize/loadFactor+1), loadFactor);
+			for (State prevState : prevStates.keySet()) {
 				if (prevState.getDuration() > 0) {
 					State nextState = new State(prevState.getDuration()-1, prevState.getState());
 					if (!currStates.containsKey(nextState)) {
@@ -470,7 +636,8 @@ public class EDiHMM<P,E,D> {
 				} else {
 					for (int s = 0; s < numStates; s++) {
 						for (int d = ranges[s].min; d <= ranges[s].max; d++) {
-							if (aux < fullTransitionProb(prevState.getState(), prevState.getDuration(), s, d)) {
+							double p = fullTransitionProb(prevState.getState(), prevState.getDuration(), s, d);
+							if (aux < p) {
 								State nextState = new State(d, s);
 								if (!currStates.containsKey(nextState)) {
 									currStates.put(nextState, new ArrayList<State>());
@@ -484,7 +651,8 @@ public class EDiHMM<P,E,D> {
 			if (currStates.size() == 0) {
 				return null;
 			}
-//			System.out.println(currStates.size() + " " + Runtime.getRuntime().freeMemory() / 1000000 + " " + Runtime.getRuntime().totalMemory() / 1000000 + " " + Runtime.getRuntime().maxMemory() / 1000000);
+			//			System.out.println(currStates.size() + " " + Runtime.getRuntime().freeMemory() / 1000000 + " " + Runtime.getRuntime().totalMemory() / 1000000 + " " + Runtime.getRuntime().maxMemory() / 1000000);
+			mapSize = Math.max(mapSize, currStates.size());
 			reachable.add(currStates);
 			prevStates = currStates;
 		}
@@ -498,83 +666,148 @@ public class EDiHMM<P,E,D> {
 	 * @param reachableStates
 	 * @return
 	 */
-	private ArrayList<HashMap<State, Double>> forwardPass(ArrayList<LinkedHashMap<State,ArrayList<State>>> reachableStates) {
-		ArrayList<HashMap<State, Double>> alphas = new ArrayList<HashMap<State, Double>>(data.length+1);
+	private ArrayList<HashMap<State, Double>> forwardPass(ArrayList<LinkedHashMap<State,ArrayList<State>>> reachableStates, E[] dat, double[] auxArr) {
+		ArrayList<HashMap<State, Double>> logAlphas = new ArrayList<HashMap<State, Double>>(dat.length+1);
 
-		HashMap<State, Double> prevAlphas = new HashMap<State, Double>();
-		prevAlphas.put(START_STATE, 1.0);
+		HashMap<State, Double> prevLogAlphas = new HashMap<State, Double>();
+		prevLogAlphas.put(START_STATE, 0.0);
 
-		for (int t = 0; t < data.length; t++) {
+		for (int t = 0; t < dat.length; t++) {
+			if (Thread.interrupted()) {
+				return null;
+			}
 			LinkedHashMap<State,ArrayList<State>> reachable = reachableStates.get(t);
-			HashMap<State, Double> currAlphas = new HashMap<State, Double>((int)(reachable.size()*1.5));
-			double sum = 0;
+			HashMap<State, Double> currLogAlphas = new HashMap<State, Double>((int)(reachable.size()/loadFactor + 1), loadFactor);
+			double maxLogAlpha = Double.NEGATIVE_INFINITY;
 			int i = 0;
 			for (Map.Entry<State, ArrayList<State>> e : reachable.entrySet()) {
 				State currState = e.getKey();
-				double alpha = 0;
+				double logAlpha = 0;
+				double[] lls = new double[e.getValue().size()];
+				double max = Double.NEGATIVE_INFINITY;
+				int j = 0;
 				for (State prevState : e.getValue()) {
-					double p = auxDistr.probability(auxArray[t]/fullTransitionProb(prevState, currState));
-					alpha += p*prevAlphas.get(prevState);
+					double p = fullTransitionProb(prevState, currState);
+					lls[j] = auxDistr.logLikelihood(auxArr[t]/p) + prevLogAlphas.get(prevState);
+					max = Math.max(lls[j], max);
+					j++;
 				}
-				alpha *= ed.probability(currState.getState(), data[t]);
-				sum += alpha;
-				currAlphas.put(currState, alpha);
+				// logAlpha  = max + log(sum{ exp(ll(i) - max) })
+				double v = 0;
+				for (Double ll : lls) {
+						v += Math.exp(ll - max);
+				}
+				logAlpha = max + Math.log(v);
+				logAlpha += ed.logLikelihood(currState.getState(), dat[t]);
+				
+				if (logAlpha == Double.NEGATIVE_INFINITY) {
+					continue;
+				} 
+				maxLogAlpha = Math.max(maxLogAlpha, logAlpha);
+				currLogAlphas.put(currState, logAlpha);
 				i++;
 			}
-			if (sum == 0)
+			if (maxLogAlpha == Double.NEGATIVE_INFINITY) {
 				return null;
-			for (Map.Entry<State, Double> e : currAlphas.entrySet()) {
-				e.setValue(e.getValue()/sum);
 			}
-			alphas.add(currAlphas);
-			prevAlphas = currAlphas;
+			// log(Z) = minLogAlpha + log(sum{ exp(logAlpha_i - minLogAlpha) })
+			double v = 0;
+			for (Double logAlpha : currLogAlphas.values()) {
+					v += Math.exp(logAlpha - maxLogAlpha);
+			}
+			double logZ = maxLogAlpha + Math.log(v);
+			double sum = 0;
+			for (Map.Entry<State, Double> e : currLogAlphas.entrySet()) {
+				e.setValue(e.getValue() - logZ);
+				sum += Math.exp(e.getValue());
+			}
+			logAlphas.add(currLogAlphas);
+			prevLogAlphas = currLogAlphas;
 		}
 
-		return alphas;
+		return logAlphas;
 	}
+	
 
-	private void backwardSample(ArrayList<HashMap<State, Double>> alphas) {
+	private boolean backwardSample(ArrayList<HashMap<State, Double>> logAlphas, State[] seq, double[] auxArr) {
 		HashMap<State, Double> currAlphas;
 		double rnd, sum, denom;
-		for (int t = data.length - 1; t >= 0; t--) {
-			currAlphas = alphas.get(t);
-			if (t < data.length - 1) {
-				denom = 0;
+		for (int t = seq.length - 1; t >= 0; t--) {
+			if (Thread.interrupted()) {
+				return false;
+			}
+			currAlphas = logAlphas.get(t);
+			denom = 0;
+			if (t < seq.length - 1) {
 				for(Map.Entry<State,Double> e : currAlphas.entrySet()) {
-					double p = fullTransitionProb(e.getKey(), ss[t+1]);
-					if (auxArray[t+1] < p) {
-						e.setValue(auxDistr.probability(auxArray[t+1]/p)*e.getValue());
+					double p = fullTransitionProb(e.getKey(), seq[t+1]);
+					if (auxArr[t+1] < p) {
+						e.setValue(auxDistr.probability(auxArr[t+1]/p)*Math.exp(e.getValue())+EPS); // move from log-likelihood to likelihood space
 						denom += e.getValue();
 					} else {
 						e.setValue(0.0);
 					}
 				}
 			} else {
-				denom = 1;
+				for(Map.Entry<State,Double> e : currAlphas.entrySet()) {
+						e.setValue(Math.exp(e.getValue())); // move from log-likelihood to likelihood space
+						denom += e.getValue();
+				}
 			}
 			rnd = Util.RNG.nextDouble();
 			sum = 0;
+//			boolean updated = false;
 			for(Map.Entry<State,Double> e : currAlphas.entrySet()) {
 				if (e.getValue() > 0) {
 					sum += e.getValue()/denom;
 					if (rnd < sum) {
-						ss[t] = e.getKey();
+						seq[t] = new State(e.getKey());
+//						updated = true;
+						//assert t == seq.length - 1 || fullTransitionProb(seq[t], seq[t+1]) > 0;
 						break;
 					}
 				}
 			}
+//			if (!updated) {
+//				return false;
+//			}
+		}
+		return true;
+	}
+	
+	private void increaseTemp() {
+		if (anneal) {
+			hypers.temperature *= TEMP_INCR_FACTOR;
+			updateAuxDistr();
 		}
 	}
+	
+	private void decreaseTemp() {
+		if (anneal) {
+			if (hypers.temperature > baseTemp) {
+				hypers.temperature *= TEMP_DECR_FACTOR;
+				if (hypers.temperature < baseTemp) {
+					hypers.temperature = baseTemp;
 
-	private double sampleAuxiliaryVars() {
+				}
+				updateAuxDistr();
+			} 
+		}
+	}
+	
+	private void updateAuxDistr() {
+		auxDistr.setParameters(1/hypers.temperature, hypers.temperature);
+	}
+
+	private double sampleAuxiliaryVars(double[] auxArr, State[] seq) {
 		double min = 1;
 		State prev = START_STATE;
-		for (int t = 0; t < auxArray.length; t++) {
-			auxArray[t] = auxDistr.sample()*fullTransitionProb(prev, ss[t]);
-			assert auxArray[t] != 0 : auxArray[t];
-			assert !Double.isNaN(auxArray[t]) : auxArray[t];
-			prev = ss[t];
-			min = Math.min(min, auxArray[t]);
+		for (int t = 0; t < auxArr.length; t++) {
+			auxArr[t] = auxDistr.sample()*fullTransitionProb(prev, seq[t]);
+			assert auxArr[t] != 0 : auxArr[t];
+			assert !Double.isNaN(auxArr[t]) : auxArr[t];
+			prev = seq[t];
+			min = Math.min(min, auxArr[t]);
 		}
 		return min;
 	}
@@ -587,14 +820,14 @@ public class EDiHMM<P,E,D> {
 	private void sampleParameters(int[][] obsCounts) {
 		int[][] rCounts = sampleRCounts(obsCounts);
 		mp.sampleParameters(hypers.c0, rCounts);
-		TransitionProbabilities tp = mp.sampleTransitionMatrix(hypers.c1, obsCounts, ss[0].getState());  
+		TransitionProbabilities tp = mp.sampleTransitionMatrix(hypers.c1, obsCounts, ss);  
 		pi = tp.pi;
 		pi0 = tp.pi0;
 
-		dd.update(numStates, ss); 
+		dd.update(numStates, ss, this);
 		ed.update(numStates, ss, data);
 
-		sampleHyperparameters(obsCounts); 
+		sampleHyperparameters(obsCounts);
 	}
 
 	private static final int CONCENTRATION_SAMPLE_STD = 1;
@@ -639,171 +872,124 @@ public class EDiHMM<P,E,D> {
 		hypers.c1 = c1;
 		//		System.out.printf("c1 accept rate = %f\n", ((double)accept)/MH_HYPER_ITERS);
 	}
-	
 
-	private static final int SM_RESTRICTED_ITERS = 5;
-	private int accepts = 0;
-	private int total = 0;
 
-	private void restrictedForwardBackward() {
-		if (numStates <= 3)
-			return;
-		
-		total++;
-		Sample<P,E,D> oldConfig = new Sample<P,E,D>(pi0, pi, mp, ss, jll(calculateTransitionCounts()), hypers, null, dd.getParameters(), null, ed.getParameters(), null);
-
-		int i = Math.abs(Util.RNG.nextInt()) % data.length;
-		int j = i;
-		while ((j = Math.abs(Util.RNG.nextInt()) % data.length) == i || ss[i].getState() == ss[j].getState()) 
-			;
-		
-		int state1 = ss[i].getState();
-		int state2 = ss[j].getState();
-		Range[] r = dd.durationRanges(1e-4);
-		int[] maxDurations = new int[ss.length];
-		// calculate maxDurations
-		for (int k = ss.length - 1; k >= 0; k--) {
-			if (ss[k].getState() == state1 || ss[k].getState() == state2) {
-				maxDurations[k] = k == ss.length - 1 ?  Math.max(r[state1].max, r[state2].max) : maxDurations[k+1]+1;
-				//maxDuration = Math.max(maxDurations[k], maxDuration);
-			} else {
-				maxDurations[k] = -1;
-			}
-		}
-		
-		double[][][] alphas = restrictedForwardPass(maxDurations, state1, state2);
-		double newLL;
-		if (Double.isNaN((newLL = restrictedBackwardSample(alphas, maxDurations, state1, state2)))) {
-			System.out.println("No restricted sampling path!");
-			restore(oldConfig);
-			return;
-		}
-		
-		cleanupStateSpace();
-		sampleTransitions();
-		dd.update(numStates, ss);
-		ed.update(numStates, ss, data);
-		
-		alphas = restrictedForwardPass(maxDurations, state1, state2);
-		double oldLL = restrictedSampleLL(oldConfig.stateSequence, alphas, maxDurations, state1, state2);
-		
-		double newJLL = jll(calculateTransitionCounts());
-		
-		double logr = Math.log(Util.RNG.nextDouble());
-		if (logr > (newJLL + oldLL - oldConfig.jll - newLL)) { // reject
-			System.out.println("Rejected restricted forward-backward");
-			// restore state
-			restore(oldConfig);
-		} else {
-			System.out.println("Accepted restricted forward-backward");
-			accepts++;
-		}
-	}
-	
-	/**
-	 * 
-	 */
-	private void splitMerge() {
-		total++;
-		Sample<P,E,D> oldConfig = new Sample<P,E,D>(pi0, pi, mp, ss, jll(calculateTransitionCounts()), hypers, null, dd.getParameters(), null, ed.getParameters(), null);
-
-		int i = Math.abs(Util.RNG.nextInt()) % data.length;
-		int j = i;
-		while ((j = Math.abs(Util.RNG.nextInt()) % data.length) == i) 
-			;
-
-		int state1, state2;
-		int[] maxDurations = new int[ss.length];
-		//int maxDuration = 0;
-		boolean split = (ss[i].getState() == ss[j].getState()) || numStates == 2;
-		if (split) {
-			state1 = ss[i].getState();
-			state2 = numStates;
-			mp.extend(hypers.c0, hypers.c1, pi, pi0);
-			dd.addState();
-			ed.addState();
-			numStates++;
-			Range[] r = dd.durationRanges(1e-4);
-			// move some states to the new state
-			for (int k = ss.length - 1; k >= 0; k--) {
-				if (ss[k].getState() == state1) {
-					maxDurations[k] = Math.max(ss[k].getDuration(), k == ss.length - 1 ? Math.max(r[state1].max, r[state2].max) : maxDurations[k+1]+1);
-					//maxDuration = Math.max(maxDurations[k], maxDuration);
-					if (k != j && (k == i || Util.RNG.nextDouble() > .5)) {
-						ss[k].setState(state2);
-						if (k < ss.length - 1 && ss[k+1].getState() == state2) {
-							ss[k].setDuration(ss[k+1].getDuration()+1);
-						}
-					}
-				} else {
-					maxDurations[k] = -1;
-				}
-			}
-			sampleTransitions();
-		} else { // merge: ss[i].getState() != ss[j].getState()
-			state1 = ss[i].getState();
-			state2 = ss[j].getState();
-			Range[] r = dd.durationRanges(1e-4);
-			// calculate maxDurations
-			for (int k = ss.length - 1; k >= 0; k--) {
-				if (ss[k].getState() == state1 || ss[k].getState() == state2) {
-					maxDurations[k] = k == ss.length - 1 ?  Math.max(r[state1].max, r[state2].max) : maxDurations[k+1]+1;
-					//maxDuration = Math.max(maxDurations[k], maxDuration);
-				} else {
-					maxDurations[k] = -1;
-				}
-			}
-		}
-		
-		// start new code here //
-		
-		double[][][] alphas = restrictedForwardPass(maxDurations, state1, state2);
-		double oldLL = restrictedSampleLL(oldConfig.stateSequence, alphas, maxDurations, state1, state2);
-		double newLL;
-		if (split) {
-			if (Double.isNaN((newLL = restrictedBackwardSample(alphas, maxDurations, state1, state2)))) {
-				System.out.println("No restricted sampling path!");
-				restore(oldConfig);
-				return;
-			}
-		} else {
-			int keepState = Math.min(state1, state2);
-			for (int t = ss.length - 1; t >= 0 ; t--) {
-				if (alphas[t] != null) {
-					ss[t].setState(keepState);
-					if (t == ss.length - 1 || alphas[t+1] == null) {
-						ss[t].setDuration(0);
-					} else {
-						ss[t].setDuration(ss[t+1].getDuration()+1);
-					}
-				}
-			}
-			newLL = restrictedSampleLL(ss, alphas, maxDurations, state1, state2);
-		}
-		
-		cleanupStateSpace();
-		sampleTransitions();
-		dd.update(numStates, ss);
-		ed.update(numStates, ss, data);
-		
-		
-		
-		// end new code here //
-//		
-//		for (int k = 0; k < SM_RESTRICTED_ITERS; k++) {
-//			double[][][] alphas = restrictedForwardPass(maxDurations, state1, state2);
-//			if (Double.isNaN(restrictedBackwardSample(alphas, maxDurations, state1, state2))) {
-//				System.out.println("No restricted sampling path!");
-//				restore(oldConfig);
-//				return;
+//	private static final int SM_RESTRICTED_ITERS = 5;
+//	private int accepts = 0;
+//	private int total = 0;
+//
+//	private void restrictedForwardBackward() {
+//		if (numStates <= 3)
+//			return;
+//
+//		total++;
+//		Sample<P,E,D> oldConfig = new Sample<P,E,D>(pi0, pi, mp, ss, jll(calculateTransitionCounts()), hypers, null, dd.getParameters(), null, ed.getParameters(), null);
+//
+//		int i = Math.abs(Util.RNG.nextInt()) % data.length;
+//		int j = i;
+//		while ((j = Math.abs(Util.RNG.nextInt()) % data.length) == i || ss[i].getState() == ss[j].getState()) 
+//			;
+//
+//		int state1 = ss[i].getState();
+//		int state2 = ss[j].getState();
+//		Range[] r = dd.durationRanges(1e-4);
+//		int[] maxDurations = new int[ss.length];
+//		// calculate maxDurations
+//		for (int k = ss.length - 1; k >= 0; k--) {
+//			if (ss[k].getState() == state1 || ss[k].getState() == state2) {
+//				maxDurations[k] = k == ss.length - 1 ?  Math.max(r[state1].max, r[state2].max) : maxDurations[k+1]+1;
+//				//maxDuration = Math.max(maxDurations[k], maxDuration);
+//			} else {
+//				maxDurations[k] = -1;
+//			}
+//		}
+//
+//		double[][][] alphas = restrictedForwardPass(maxDurations, state1, state2);
+//		double newLL;
+//		if (Double.isNaN((newLL = restrictedBackwardSample(alphas, maxDurations, state1, state2)))) {
+//			System.out.println("No restricted sampling path!");
+//			restore(oldConfig);
+//			return;
+//		}
+//
+//		cleanupStateSpace();
+//		sampleTransitions();
+//		dd.update(numStates, ss);
+//		ed.update(numStates, ss, data);
+//
+//		alphas = restrictedForwardPass(maxDurations, state1, state2);
+//		double oldLL = restrictedSampleLL(oldConfig.stateSequence, alphas, maxDurations, state1, state2);
+//
+//		double newJLL = jll(calculateTransitionCounts());
+//
+//		double logr = Math.log(Util.RNG.nextDouble());
+//		if (logr > (newJLL + oldLL - oldConfig.jll - newLL)) { // reject
+//			System.out.println("Rejected restricted forward-backward");
+//			// restore state
+//			restore(oldConfig);
+//		} else {
+//			System.out.println("Accepted restricted forward-backward");
+//			accepts++;
+//		}
+//	}
+//
+//	/**
+//	 * 
+//	 */
+//	private void splitMerge() {
+//		total++;
+//		Sample<P,E,D> oldConfig = new Sample<P,E,D>(pi0, pi, mp, ss, jll(calculateTransitionCounts()), hypers, null, dd.getParameters(), null, ed.getParameters(), null);
+//
+//		int i = Math.abs(Util.RNG.nextInt()) % data.length;
+//		int j = i;
+//		while ((j = Math.abs(Util.RNG.nextInt()) % data.length) == i) 
+//			;
+//
+//		int state1, state2;
+//		int[] maxDurations = new int[ss.length];
+//		//int maxDuration = 0;
+//		boolean split = (ss[i].getState() == ss[j].getState()) || numStates == 2;
+//		if (split) {
+//			state1 = ss[i].getState();
+//			state2 = numStates;
+//			mp.extend(hypers.c0, hypers.c1, pi, pi0);
+//			dd.addState();
+//			ed.addState();
+//			numStates++;
+//			Range[] r = dd.durationRanges(1e-4);
+//			// move some states to the new state
+//			for (int k = ss.length - 1; k >= 0; k--) {
+//				if (ss[k].getState() == state1) {
+//					maxDurations[k] = Math.max(ss[k].getDuration(), k == ss.length - 1 ? Math.max(r[state1].max, r[state2].max) : maxDurations[k+1]+1);
+//					//maxDuration = Math.max(maxDurations[k], maxDuration);
+//					if (k != j && (k == i || Util.RNG.nextDouble() > .5)) {
+//						ss[k].setState(state2);
+//						if (k < ss.length - 1 && ss[k+1].getState() == state2) {
+//							ss[k].setDuration(ss[k+1].getDuration()+1);
+//						}
+//					}
+//				} else {
+//					maxDurations[k] = -1;
+//				}
 //			}
 //			sampleTransitions();
-//			dd.update(numStates, ss);
-//			ed.update(numStates, ss, data);
+//		} else { // merge: ss[i].getState() != ss[j].getState()
+//			state1 = ss[i].getState();
+//			state2 = ss[j].getState();
+//			Range[] r = dd.durationRanges(1e-4);
+//			// calculate maxDurations
+//			for (int k = ss.length - 1; k >= 0; k--) {
+//				if (ss[k].getState() == state1 || ss[k].getState() == state2) {
+//					maxDurations[k] = k == ss.length - 1 ?  Math.max(r[state1].max, r[state2].max) : maxDurations[k+1]+1;
+//					//maxDuration = Math.max(maxDurations[k], maxDuration);
+//				} else {
+//					maxDurations[k] = -1;
+//				}
+//			}
 //		}
-//		
-//		//Sample<P,E> launchConfig = new Sample<P,E>(pi0, pi, mp, ss, 0, hypers.c0, hypers.c1, dd.getParameters(), ed.getParameters());
-//		
+//
+//		// start new code here //
+//
 //		double[][][] alphas = restrictedForwardPass(maxDurations, state1, state2);
 //		double oldLL = restrictedSampleLL(oldConfig.stateSequence, alphas, maxDurations, state1, state2);
 //		double newLL;
@@ -827,175 +1013,222 @@ public class EDiHMM<P,E,D> {
 //			}
 //			newLL = restrictedSampleLL(ss, alphas, maxDurations, state1, state2);
 //		}
-//		
+//
 //		cleanupStateSpace();
 //		sampleTransitions();
 //		dd.update(numStates, ss);
 //		ed.update(numStates, ss, data);
-		
-		double newJLL = jll(calculateTransitionCounts());
-		
-		double logr = Math.log(Util.RNG.nextDouble());
-		if (logr > (newJLL + oldLL - oldConfig.jll - newLL)) { // reject
-			System.out.println("Rejected " + (split ? "split" : "merge"));
-			// restore state
-			restore(oldConfig);
-		} else {
-			System.out.println("Accepted " + (split ? "split" : "merge"));
-			accepts++;
-		}
-	}
-	
-	private void restore(Sample<P,E,D> config) {
-		pi0 = config.pi0;
-		pi = config.pi;
-		mp = config.mp;
-		ss = config.stateSequence;
-		dd.setParameters(config.durationParams);
-		ed.setParameters(config.emitParams);
-		numStates = pi.length;
-	}
-
-	/**
-	 * 
-	 * @param maxDuration
-	 * @param maxDurations
-	 * @param states
-	 */
-	private double[][][] restrictedForwardPass(int[] maxDurations, int... states) {
-		double[][][] alphas = new double[ss.length][][];
-
-		for (int t = 0; t < ss.length; t++) {
-			if (maxDurations[t] >= 0) {
-				alphas[t] = new double[states.length][];
-				for (int s = 0; s < states.length; s++) {
-					alphas[t][s] = new double[maxDurations[t]+1];
-				}
-			} else {
-				alphas[t] = null;
-			}
-		}
-
-		double sum = 0;
-		// initialize if necessary
-		if (alphas[0] != null) {
-			for (int s = 0; s < states.length; s++) {
-				for (int d = 0; d <= maxDurations[0]; d++) {
-					alphas[0][s][d] = pi0[s]*dd.probability(states[s], d)*ed.probability(states[s], data[0]);
-					sum += alphas[0][s][d];
-				}
-			}
-			for (int s = 0; s < states.length; s++) {
-				for (int d = 0; d <= maxDurations[0]; d++) {
-					alphas[0][s][d] /= sum;
-				}
-			}
-		}
-
-		for (int t = 1; t < ss.length; t++) {
-			if (alphas[t] != null) {
-				sum = 0;
-				if (alphas[t-1] != null) {
-					for (int s1 = 0; s1 < states.length; s1++) {
-						for (int d1 = 0; d1 <= maxDurations[t]; d1++) {
-							for (int s2 = 0; s2 < states.length; s2++) {
-								for (int d2 = 0; d2 <= maxDurations[t]; d2++) {
-									alphas[t][s1][d1] += fullTransitionProb(states[s2], d2, states[s1], d1)*alphas[t-1][s2][d2];
-								}
-							}
-							alphas[t][s1][d1] *= ed.probability(states[s1], data[t]);
-							sum += alphas[t][s1][d1];
-						}
-					}
-				} else { // maxDurations[t-1] == -1
-					for (int s = 0; s < states.length; s++) {
-						for (int d = 0; d <= maxDurations[t]; d++) {
-							alphas[t][s][d] = fullTransitionProb(ss[t-1].getState(), ss[t-1].getDuration(), states[s], d)*ed.probability(states[s], data[t]);
-							sum += alphas[t][s][d];
-						}
-					}
-				}
-				for (int s = 0; s < states.length; s++) {
-					for (int d = 0; d <= maxDurations[t]; d++) {
-						alphas[t][s][d] /= sum;
-					}
-				}
-			}
-		}
-
-		return alphas;
-	}
-	
-	private double restrictedBackwardSample(double[][][] alphas, int[] maxDurations, int... states) {
-		double ll = 0;
-		double sum = 0;
-		double r;
-		int last = ss.length - 1;
-		
-		if (alphas[last] != null) {
-			r = Util.RNG.nextDouble();
-			OUTSIDE:
-				for (int s = 0; s < states.length; s++) {
-					for (int d = 0; d <= maxDurations[last]; d++) {
-						sum += alphas[last][s][d];
-						if (r < sum) {
-							ss[last] = new State(d,states[s]);
-							break OUTSIDE;
-						}
-					}
-				}
-		}
-		
-		for (int t = last - 1 ; t >= 0; t--) {
-			if (alphas[t] != null) {
-				double denom = 0;
-				for (int s = 0; s < states.length; s++) {
-					for (int d = 0; d <= maxDurations[t]; d++) {
-						alphas[t][s][d] *= fullTransitionProb(states[s],d,ss[t+1].getState(), ss[t+1].getDuration());
-						denom += alphas[t][s][d];
-					}
-				}
-				if (denom == 0) {
-					return Double.NaN;
-				}
-				r = Util.RNG.nextDouble();
-				sum = 0;
-				OUTSIDE:
-					for (int s = 0; s < states.length; s++) {
-						for (int d = 0; d <= maxDurations[t]; d++) {
-							sum += alphas[t][s][d]/denom;
-							if (r < sum) {
-								ss[t] = new State(d, states[s]);
-								ll += Math.log(alphas[t][s][d]);
-								break OUTSIDE;
-							}
-						}
-					}
-			}
-		}
-		return ll;
-	}
-	
-	private double restrictedSampleLL(State[] ss, double[][][] alphas, int[] maxDurations, int... states) {
-		HashMap<Integer,Integer> reverseStateMap = new HashMap<Integer, Integer>();
-		for (int s = 0; s < states.length; s++) {
-			reverseStateMap.put(states[s], s);
-		}
-		double ll = 0;
-		for (int t = ss.length - 1 ; t >= 0; t--) {
-			if (alphas[t] != null) {
-				double l = Math.log(alphas[t][reverseStateMap.get(ss[t].getState())][ss[t].getDuration()]);
-				ll += l;
-			}
-		}
-		return ll;
-	}
+//
+//
+//
+//		// end new code here //
+//		//		
+//		//		for (int k = 0; k < SM_RESTRICTED_ITERS; k++) {
+//		//			double[][][] alphas = restrictedForwardPass(maxDurations, state1, state2);
+//		//			if (Double.isNaN(restrictedBackwardSample(alphas, maxDurations, state1, state2))) {
+//		//				System.out.println("No restricted sampling path!");
+//		//				restore(oldConfig);
+//		//				return;
+//		//			}
+//		//			sampleTransitions();
+//		//			dd.update(numStates, ss);
+//		//			ed.update(numStates, ss, data);
+//		//		}
+//		//		
+//		//		//Sample<P,E> launchConfig = new Sample<P,E>(pi0, pi, mp, ss, 0, hypers.c0, hypers.c1, dd.getParameters(), ed.getParameters());
+//		//		
+//		//		double[][][] alphas = restrictedForwardPass(maxDurations, state1, state2);
+//		//		double oldLL = restrictedSampleLL(oldConfig.stateSequence, alphas, maxDurations, state1, state2);
+//		//		double newLL;
+//		//		if (split) {
+//		//			if (Double.isNaN((newLL = restrictedBackwardSample(alphas, maxDurations, state1, state2)))) {
+//		//				System.out.println("No restricted sampling path!");
+//		//				restore(oldConfig);
+//		//				return;
+//		//			}
+//		//		} else {
+//		//			int keepState = Math.min(state1, state2);
+//		//			for (int t = ss.length - 1; t >= 0 ; t--) {
+//		//				if (alphas[t] != null) {
+//		//					ss[t].setState(keepState);
+//		//					if (t == ss.length - 1 || alphas[t+1] == null) {
+//		//						ss[t].setDuration(0);
+//		//					} else {
+//		//						ss[t].setDuration(ss[t+1].getDuration()+1);
+//		//					}
+//		//				}
+//		//			}
+//		//			newLL = restrictedSampleLL(ss, alphas, maxDurations, state1, state2);
+//		//		}
+//		//		
+//		//		cleanupStateSpace();
+//		//		sampleTransitions();
+//		//		dd.update(numStates, ss);
+//		//		ed.update(numStates, ss, data);
+//
+//		double newJLL = jll(calculateTransitionCounts());
+//
+//		double logr = Math.log(Util.RNG.nextDouble());
+//		if (logr > (newJLL + oldLL - oldConfig.jll - newLL)) { // reject
+//			System.out.println("Rejected " + (split ? "split" : "merge"));
+//			// restore state
+//			restore(oldConfig);
+//		} else {
+//			System.out.println("Accepted " + (split ? "split" : "merge"));
+//			accepts++;
+//		}
+//	}
+//
+//	private void restore(Sample<P,E,D> config) {
+//		pi0 = config.pi0;
+//		pi = config.pi;
+//		mp = config.mp;
+//		ss = config.stateSequence;
+//		dd.setParameters(config.durationParams);
+//		ed.setParameters(config.emitParams);
+//		numStates = pi.length;
+//	}
+//
+//	/**
+//	 * 
+//	 * @param maxDuration
+//	 * @param maxDurations
+//	 * @param states
+//	 */
+//	private double[][][] restrictedForwardPass(int[] maxDurations, int... states) {
+//		double[][][] alphas = new double[ss.length][][];
+//
+//		for (int t = 0; t < ss.length; t++) {
+//			if (maxDurations[t] >= 0) {
+//				alphas[t] = new double[states.length][];
+//				for (int s = 0; s < states.length; s++) {
+//					alphas[t][s] = new double[maxDurations[t]+1];
+//				}
+//			} else {
+//				alphas[t] = null;
+//			}
+//		}
+//
+//		double sum = 0;
+//		// initialize if necessary
+//		if (alphas[0] != null) {
+//			for (int s = 0; s < states.length; s++) {
+//				for (int d = 0; d <= maxDurations[0]; d++) {
+//					alphas[0][s][d] = pi0[s]*dd.probability(states[s], d)*ed.probability(states[s], data[0]);
+//					sum += alphas[0][s][d];
+//				}
+//			}
+//			for (int s = 0; s < states.length; s++) {
+//				for (int d = 0; d <= maxDurations[0]; d++) {
+//					alphas[0][s][d] /= sum;
+//				}
+//			}
+//		}
+//
+//		for (int t = 1; t < ss.length; t++) {
+//			if (alphas[t] != null) {
+//				sum = 0;
+//				if (alphas[t-1] != null) {
+//					for (int s1 = 0; s1 < states.length; s1++) {
+//						for (int d1 = 0; d1 <= maxDurations[t]; d1++) {
+//							for (int s2 = 0; s2 < states.length; s2++) {
+//								for (int d2 = 0; d2 <= maxDurations[t]; d2++) {
+//									alphas[t][s1][d1] += fullTransitionProb(states[s2], d2, states[s1], d1)*alphas[t-1][s2][d2];
+//								}
+//							}
+//							alphas[t][s1][d1] *= ed.probability(states[s1], data[t]);
+//							sum += alphas[t][s1][d1];
+//						}
+//					}
+//				} else { // maxDurations[t-1] == -1
+//					for (int s = 0; s < states.length; s++) {
+//						for (int d = 0; d <= maxDurations[t]; d++) {
+//							alphas[t][s][d] = fullTransitionProb(ss[t-1].getState(), ss[t-1].getDuration(), states[s], d)*ed.probability(states[s], data[t]);
+//							sum += alphas[t][s][d];
+//						}
+//					}
+//				}
+//				for (int s = 0; s < states.length; s++) {
+//					for (int d = 0; d <= maxDurations[t]; d++) {
+//						alphas[t][s][d] /= sum;
+//					}
+//				}
+//			}
+//		}
+//
+//		return alphas;
+//	}
+//
+//	private double restrictedBackwardSample(double[][][] alphas, int[] maxDurations, int... states) {
+//		double ll = 0;
+//		double sum = 0;
+//		double r;
+//		int last = ss.length - 1;
+//
+//		if (alphas[last] != null) {
+//			r = Util.RNG.nextDouble();
+//			OUTSIDE:
+//				for (int s = 0; s < states.length; s++) {
+//					for (int d = 0; d <= maxDurations[last]; d++) {
+//						sum += alphas[last][s][d];
+//						if (r < sum) {
+//							ss[last] = new State(d,states[s]);
+//							break OUTSIDE;
+//						}
+//					}
+//				}
+//		}
+//
+//		for (int t = last - 1 ; t >= 0; t--) {
+//			if (alphas[t] != null) {
+//				double denom = 0;
+//				for (int s = 0; s < states.length; s++) {
+//					for (int d = 0; d <= maxDurations[t]; d++) {
+//						alphas[t][s][d] *= fullTransitionProb(states[s],d,ss[t+1].getState(), ss[t+1].getDuration());
+//						denom += alphas[t][s][d];
+//					}
+//				}
+//				if (denom == 0) {
+//					return Double.NaN;
+//				}
+//				r = Util.RNG.nextDouble();
+//				sum = 0;
+//				OUTSIDE:
+//					for (int s = 0; s < states.length; s++) {
+//						for (int d = 0; d <= maxDurations[t]; d++) {
+//							sum += alphas[t][s][d]/denom;
+//							if (r < sum) {
+//								ss[t] = new State(d, states[s]);
+//								ll += Math.log(alphas[t][s][d]);
+//								break OUTSIDE;
+//							}
+//						}
+//					}
+//			}
+//		}
+//		return ll;
+//	}
+//
+//	private double restrictedSampleLL(State[] ss, double[][][] alphas, int[] maxDurations, int... states) {
+//		HashMap<Integer,Integer> reverseStateMap = new HashMap<Integer, Integer>();
+//		for (int s = 0; s < states.length; s++) {
+//			reverseStateMap.put(states[s], s);
+//		}
+//		double ll = 0;
+//		for (int t = ss.length - 1 ; t >= 0; t--) {
+//			if (alphas[t] != null) {
+//				double l = Math.log(alphas[t][reverseStateMap.get(ss[t].getState())][ss[t].getDuration()]);
+//				ll += l;
+//			}
+//		}
+//		return ll;
+//	}
 
 	private void sampleTransitions() {
 		int[][] obsCounts = calculateTransitionCounts();
 		int[][] rCounts = sampleRCounts(obsCounts);
 		mp.sampleParameters(hypers.c0, rCounts);
-		TransitionProbabilities tp =  mp.sampleTransitionMatrix(hypers.c1, obsCounts, ss[0].getState());
+		TransitionProbabilities tp =  mp.sampleTransitionMatrix(hypers.c1, obsCounts, ss);
 		pi = tp.pi;
 		pi0 = tp.pi0;
 	}
@@ -1003,18 +1236,20 @@ public class EDiHMM<P,E,D> {
 	private int[][] calculateTransitionCounts() {
 		return calculateTransitionCounts(ss);
 	}
-			
+
 	/**
 	 * 
 	 * @return
 	 */
-	private int[][] calculateTransitionCounts(State[] ss) {
+	private int[][] calculateTransitionCounts(ArrayList<State[]> ss) {
 		int[][] obsCounts = new int[numStates][numStates+1];
 
-		for (int t = 1; t < ss.length; t++) {
-			if (ss[t-1].getDuration() == 0) {
-				assert ss[t-1].getState() != ss[t].getState();
-				obsCounts[ss[t-1].getState()][ss[t].getState()]++;
+		for (State[] seq : ss) {
+			for (int t = 1; t < seq.length; t++) {
+				if (seq[t-1].getDuration() == 0) {
+					assert seq[t-1].getState() != seq[t].getState();
+					obsCounts[seq[t-1].getState()][seq[t].getState()]++;
+				}
 			}
 		}
 		return obsCounts;
@@ -1057,18 +1292,18 @@ public class EDiHMM<P,E,D> {
 		if (oldD > 0) {
 			return (newD == oldD - 1 && oldS == newS) ? 1 : 0; 
 		} else if (oldS == START_STATE.getState()) {
-			return pi0[newS]*dd.probability(newS, newD);
+			return pi0[newS]*Math.exp(dd.logLikelihood(newS, newD));
 		}
-		return pi[oldS][newS]*dd.probability(newS, newD);
+		return pi[oldS][newS]*Math.exp(dd.logLikelihood(newS, newD));
 	}
-	
+
 	/**
 	 * Calculate the current joint log likelihood of the model
 	 * 
 	 * @return the joint log likelihood
 	 */
 	public double jll() {
-		return jll(calculateTransitionCounts());
+		return jll(calculateTransitionCounts(), false);
 	}
 
 	private double jll(int[][] obsCounts) { 
@@ -1082,7 +1317,7 @@ public class EDiHMM<P,E,D> {
 		jll += dd.logLikelihood(ss);
 		if (print) System.out.println(jll);
 
-		assert !Double.isInfinite(jll) && !Double.isNaN(jll) : jll + "\n" + ed + "\n" + dd;
+		//assert !Double.isInfinite(jll) && !Double.isNaN(jll) : jll + "\n" + ed + "\n" + dd;
 
 		// transition LL
 		for (int m = 0; m < obsCounts.length; m++) {
@@ -1092,22 +1327,22 @@ public class EDiHMM<P,E,D> {
 			//jll += DirichletDistribution.logPartition(Util.addArrays(c1b, obsCounts[m]));
 			//jll -= DirichletDistribution.logPartition(c1b);
 			jll += ll;
-			assert !Double.isInfinite(jll) && !Double.isNaN(jll) : jll + " " + Arrays.toString(c1b);
+			//assert !Double.isInfinite(jll) && !Double.isNaN(jll) : jll + " " + Arrays.toString(c1b);
 		}
 		if (print) System.out.println(jll);
 
 		jll += mp.gammasLogLikelihood(hypers.c0);
-		assert !Double.isInfinite(jll) && !Double.isNaN(jll) : jll + "\n" + mp;
+		//assert !Double.isInfinite(jll) && !Double.isNaN(jll) : jll + "\n" + mp;
 		if (print) System.out.println(jll);
 		jll += (numStates+1)*GammaDistribution.logLikelihood(hypers.c0_a, hypers.c0_b, hypers.c0);
-		assert !Double.isInfinite(jll) && !Double.isNaN(jll) : jll;
+		//assert !Double.isInfinite(jll) && !Double.isNaN(jll) : jll;
 		jll += numStates*GammaDistribution.logLikelihood(hypers.c1_a, hypers.c1_b, hypers.c1);
 		if (print) System.out.println(jll);
 
-		assert !Double.isInfinite(jll) && !Double.isNaN(jll) : jll;
+		//assert !Double.isInfinite(jll) && !Double.isNaN(jll) : jll;
 		return jll;
 	}
-	
+
 	/**
 	 * Sample a state sequence using the current configuration
 	 * of the ED-iHMM
@@ -1123,7 +1358,7 @@ public class EDiHMM<P,E,D> {
 			ss[i] = sampleNextState(prevState);
 			prevState = ss[i];
 		}
-		System.out.println(Arrays.toString(ss));
+		//System.out.println(Arrays.toString(ss));
 		return ss;
 	}
 
@@ -1158,18 +1393,71 @@ public class EDiHMM<P,E,D> {
 		return next;
 	}
 
-	public void addIterationListener(IterationListener il) {
+	public void addIterationListener(IterationListener<P,E,D> il) {
 		iterListeners.add(il);
 	}
 
-	public void removeIterationListener(IterationListener il) {
+	public void removeIterationListener(IterationListener<P,E,D> il) {
 		iterListeners.remove(il);
 	}
 
 	private void passSampleToListeners(Sample<P,E,D> s, boolean keep) {
-		for(IterationListener il : iterListeners) {
+		for(IterationListener<P,E,D> il : iterListeners) {
 			il.newSample(s, keep);
 		}
+	}
+	
+	private class ForwardBackward implements Callable<Boolean> {
+
+		private int i;
+		private double minAux;
+		private double[] aux;
+		private State[] seq;
+		private E[] data;
+		
+
+		/**
+		 * Constructs a <tt>ForwardBackward</tt> object.
+		 *
+		 * @param minAux
+		 * @param aux
+		 * @param seq
+		 * @param data
+		 */
+		public ForwardBackward(int i, double minAux, double[] aux, State[] seq, E[] data) {
+			this.i = i;
+			this.minAux = minAux;
+			this.aux = aux;
+			this.seq = seq;
+			this.data = data;
+		}
+
+
+		public Boolean call() {
+			System.out.println("Job " + i + " starting");
+			ArrayList<LinkedHashMap<State,ArrayList<State>>> reachableStates = reachableStates(minAux, aux);
+			
+			if (reachableStates == null || Thread.interrupted()) {
+				System.out.println("Job " + i + " failed");
+				return false;
+			}
+
+			ArrayList<HashMap<State, Double>> logAlphas = forwardPass(reachableStates, data, aux); 
+
+			if (logAlphas == null || Thread.interrupted()) {
+				System.out.println("Job " + i + " failed");
+				return false;
+			}
+
+			boolean success = backwardSample(logAlphas, seq, aux);
+			if (!success) {
+				System.out.println("Job " + i + " failed");
+			} else {
+				System.out.println("Job " + i + " done");
+			}
+			return success;
+		}
+		
 	}
 
 }

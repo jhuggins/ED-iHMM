@@ -12,13 +12,13 @@ import edu.columbia.stat.wood.edihmm.Sample;
  * @author Jonathan Huggins
  *
  */
-public interface IterationListener {
+public interface IterationListener<P,E,D> {
 
 	/**
 	 * 
 	 * @param s
 	 * @param keep
 	 */
-	public void newSample(Sample s, boolean keep);
+	public void newSample(Sample<P,E,D> s, boolean keep);
 	
 }

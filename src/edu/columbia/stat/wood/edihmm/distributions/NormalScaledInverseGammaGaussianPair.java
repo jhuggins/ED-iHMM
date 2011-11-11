@@ -4,6 +4,7 @@
 package edu.columbia.stat.wood.edihmm.distributions;
 
 import java.io.Serializable;
+import java.util.Collection;
 
 import cern.jet.stat.Gamma;
 
@@ -40,11 +41,12 @@ public class NormalScaledInverseGammaGaussianPair extends PriorDataDistributionP
 
 	@Override
 	public double dataLogLikelihood(GaussianParams params, Double value) {
-		return GaussianDistribution.logLikelihood(params.mean,  params.variance, value);
+		double ll = GaussianDistribution.logLikelihood(params.mean,  params.variance, value);
+		return ll;
 	}
 
 	@Override
-	public double observationLogLikelihood(Iterable<Double> observations, GaussianParams param) {
+	public double observationLogLikelihood(Collection<Double> observations, GaussianParams param) {
 		double sum = 0;
 		double sumSq = 0;
 		int n = 0;
@@ -71,7 +73,7 @@ public class NormalScaledInverseGammaGaussianPair extends PriorDataDistributionP
 	}
 
 	@Override
-	public GaussianParams samplePosterior(Iterable<Double> observations) {
+	public GaussianParams samplePosterior(Collection<Double> observations) {
 		double sum = 0;
 		double sumSq = 0;
 		int n = 0;

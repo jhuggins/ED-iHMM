@@ -4,6 +4,7 @@
 package edu.columbia.stat.wood.edihmm;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 
 import edu.columbia.stat.wood.edihmm.distributions.IntegerPriorDataDistributionPair;
 import edu.columbia.stat.wood.edihmm.distributions.PriorDataDistributionPair;
@@ -35,7 +36,7 @@ public class Sample<P, E, D> implements Serializable {
 	/**
 	 * Sample state sequence 
 	 */
-	public final State[] stateSequence;
+	public final ArrayList<State[]> stateSequence;
 	/**
 	 * Joint log likelihood
 	 */
@@ -63,7 +64,7 @@ public class Sample<P, E, D> implements Serializable {
 	/**
 	 * 
 	 */
-	public final double[] predictiveProbabilities;
+	public final double[][] predictiveProbabilities;
 	
 	/**
 	 * Constructs a <tt>Sample</tt> object. Clones <tt>mp</tt> and makes 
@@ -76,16 +77,21 @@ public class Sample<P, E, D> implements Serializable {
 	 * @param c0
 	 * @param c1
 	 */
-	public Sample(double[] pi0, double[][] pi, MixingProportions mp, State[] ss, double jll, 
+	public Sample(double[] pi0, double[][] pi, MixingProportions mp, ArrayList<State[]> ss, double jll, 
 			Hyperparameters hypers, IntegerPriorDataDistributionPair<D> durationDistribution,
 			D[] durationParams, PriorDataDistributionPair<P,E> emitDistribution, P[] emitParams,
-			double[] predictiveProbabilities) {
+			double[][] predictiveProbabilities) {
 		this.pi0 = pi0;
 		this.pi = pi;
 		this.mp = mp.clone();
-		stateSequence = new State[ss.length];
-		for (int i = 0; i < ss.length; i++) 
-			stateSequence[i] = new State(ss[i]);
+		stateSequence = new ArrayList<State[]>();
+		for (State[] s : ss) {
+			State[] sc = new State[s.length];
+			for (int i = 0; i < s.length; i++) 
+				sc[i] = new State(s[i]);
+			stateSequence.add(sc);
+			
+		}
 		this.jll = jll;
 		this.hypers = hypers.clone();
 		this.durationDistribution = durationDistribution;

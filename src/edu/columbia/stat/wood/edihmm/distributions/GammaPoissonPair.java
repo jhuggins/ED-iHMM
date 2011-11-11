@@ -3,6 +3,8 @@
  */
 package edu.columbia.stat.wood.edihmm.distributions;
 
+import java.util.Collection;
+
 import cern.jet.stat.Gamma;
 
 
@@ -37,7 +39,7 @@ public class GammaPoissonPair extends IntegerPriorDataDistributionPair<Double> {
 	}
 
 	@Override
-	public Double samplePosterior(Iterable<Integer> observations) {
+	public Double samplePosterior(Collection<Integer> observations) {
 		int sum = 0;
 		int n = 0;
 		for (Integer obs : observations) {
@@ -50,7 +52,7 @@ public class GammaPoissonPair extends IntegerPriorDataDistributionPair<Double> {
 	}
 
 	@Override
-	public double observationLogLikelihood(Iterable<Integer> observations, Double param) {
+	public double observationLogLikelihood(Collection<Integer> observations, Double param) {
 		int sum = 0;
 		int n = 0;
 		double ll = 0;

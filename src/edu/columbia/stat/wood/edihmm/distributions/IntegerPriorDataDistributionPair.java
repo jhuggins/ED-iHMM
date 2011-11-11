@@ -40,6 +40,7 @@ public abstract class IntegerPriorDataDistributionPair<P> extends PriorDataDistr
 		int max = -1;
 		double dll;
 		for (int i = 0; ; i += RANGE_SEARCH_INCR) {
+//			System.out.println(i);
 			dll = dataLogLikelihood(param, i);
 			if (min == -1 && dll > minLL) {
 				min = i;
@@ -55,14 +56,4 @@ public abstract class IntegerPriorDataDistributionPair<P> extends PriorDataDistr
 	protected abstract int mode(P param);
 
 
-	/**
-	 * p(value | param)
-	 * 
-	 * @param param
-	 * @param value
-	 * @return
-	 */
-	public double probability(P param, int value) {
-		return Math.exp(dataLogLikelihood(param, value));
-	}
 }

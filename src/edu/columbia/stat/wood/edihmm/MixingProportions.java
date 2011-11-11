@@ -87,7 +87,7 @@ public class MixingProportions implements Serializable, Cloneable {
 	 * Constructs a <tt>MixingProportions</tt> object, using <tt>c0</tt> and
 	 * <tt>rCounts</tt> to initially sample gamma and the auxiliary variables
 	 * 
-	 * <tt>a</tt> and <tt>b</tt> are the parameters for the beta distribution,
+	 * <tt>a</tt> and <tt>b</tt> are the parameters for the scale distribution,
 	 * which is the prior for the parameter <tt>q</tt> for the geometric 
 	 * distribution from which elements of the index list are drawn.
 	 *
@@ -110,7 +110,7 @@ public class MixingProportions implements Serializable, Cloneable {
 	 * Constructs a <tt>MixingProportions</tt> object, using <tt>c0</tt> and
 	 * <tt>rCounts</tt> to initially sample gamma and the auxiliary variables
 	 * 
-	 * <tt>a</tt> and <tt>b</tt> are the parameters for the beta distribution,
+	 * <tt>a</tt> and <tt>b</tt> are the parameters for the scale distribution,
 	 * which is the prior for the parameter <tt>q</tt> for the geometric 
 	 * distribution from which elements of the index list are drawn.
 	 *
@@ -197,7 +197,7 @@ public class MixingProportions implements Serializable, Cloneable {
 	
 	
 	/**
-	 * Get the m-th row of beta ÐÐ i.e., the mixing proportions for 
+	 * Get the m-th row of scale ÐÐ i.e., the mixing proportions for 
 	 * the m-th dependent DP
 	 * 
 	 * @param m
@@ -226,7 +226,24 @@ public class MixingProportions implements Serializable, Cloneable {
 	 * @param obsCounts observed transition counts
 	 * @return 
 	 */
-	public TransitionProbabilities sampleTransitionMatrix(double c1, int[][] obsCounts, int... startStates) {
+	public TransitionProbabilities sampleTransitionMatrix(double c1, int[][] obsCounts) {
+		return sampleTransitionMatrix(c1, obsCounts, null);
+	}
+	/**
+	 * Counts should have zeros in the last column
+	 * 
+	 * @param c1
+	 * @param obsCounts observed transition counts
+	 * @return 
+	 */
+	public TransitionProbabilities sampleTransitionMatrix(double c1, int[][] obsCounts, List<State[]> ss) {
+		int[] startStates = new int[ss == null ? 0 : ss.size()];
+		if (ss != null) {
+			int i = 0;
+			for (State[] s : ss) {
+				startStates[i++] = s[0].getState();
+			}
+		}
 		double[][] pi = new double[gamma.size() - 1][gamma.size()];
 		for (int m = 0; m < pi.length; m++) {
 			assert obsCounts[m][m] == 0 : "Diagonal of counts matrix should be all zeros";
@@ -432,9 +449,9 @@ public class MixingProportions implements Serializable, Cloneable {
 			
 			// add new column of probabilities & update unobserved transition probabilities
 			for (int i = 0; i < n; i++) {
-				//System.out.printf("beta(%d) = %s\n", i, Arrays.toString(getBetas(i)));
+				//System.out.printf("scale(%d) = %s\n", i, Arrays.toString(getBetas(i)));
 				double prop = BetaDistribution.sample(c1*getBeta(i,n), c1*getBeta(i,n+1));
-				//System.out.printf("beta(%d,n)=%f, beta(%d,n+1)=%f, prop=%f\n", i, getBeta(i,n), i, getBeta(i,n+1), prop);
+				//System.out.printf("scale(%d,n)=%f, scale(%d,n+1)=%f, prop=%f\n", i, getBeta(i,n), i, getBeta(i,n+1), prop);
 				newPi[i][n] = prop*pi[i][n];
 				newPi[i][n+1] = (1-prop)*pi[i][n];
 			}
@@ -456,15 +473,17 @@ public class MixingProportions implements Serializable, Cloneable {
 	 * @param counts
 	 * @return list of removed states
 	 */
-	public List<Integer> compress(State[] stateSeq) {
+	public List<Integer> compress(List<State[]> seqs) {
 		assert q > 0;
 		assert aux.size() == gamma.size() - 1 : String.format("%d, %d", aux.size(), gamma.size());
 		assert indices.size() == gamma.size() - 1 : String.format("%d, %d", indices.size(), gamma.size());
 		assert indices.size() == indSet.size() : String.format("%d, %d", indices.size(), indSet.size());
 		
 		boolean[] didObserveState = new boolean[states()];
-		for (State s : stateSeq) {
-			didObserveState[s.getState()] = true;
+		for (State[] seq : seqs) {
+			for (State s : seq) {
+				didObserveState[s.getState()] = true;
+			}
 		}
 		LinkedList<Integer> removedStates = new LinkedList<Integer>();
 		int[] offsets = new int[states()];
@@ -487,8 +506,10 @@ public class MixingProportions implements Serializable, Cloneable {
 		}
 		// adjust state values in the state sequence
 		if (offset < 0) {
-			for (State s : stateSeq) {
-				s.setState(s.getState() + offsets[s.getState()]);
+			for (State[] seq : seqs) {
+				for (State s : seq) {
+					s.setState(s.getState() + offsets[s.getState()]);
+				}
 			}
 		}
 		return removedStates;
